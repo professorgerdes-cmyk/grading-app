@@ -122,7 +122,7 @@ def looks_like_url(s: str) -> bool:
 
 def looks_like_pdf_ref(s: str) -> bool:
     s = (s or "").strip().lower()
-    return (".pdf" in s)
+    return (".pdf" in s) or ("sharepoint.com" in s) or ("onedrive" in s)
 
 
 def download_pdf(url: str) -> bytes:
