@@ -51,7 +51,7 @@ Cells 2, 3, and 5 are ignored.
 
 # ---------- Helpers ----------
 def split_cells(text):
-    parts = re.split(r"[\t\r\n]+", text.strip())
+    parts = re.split(r"\t+|\r?\n+|\s{2,}", text.strip())
     parts = [p for p in parts if p]
     while len(parts) < 6:
         parts.append("")
