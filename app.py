@@ -52,7 +52,7 @@ Cells 2, 3, and 5 are ignored.
 # ---------- Helpers ----------
 def split_cells(text):
     parts = re.split(r"\t+|\r?\n+|\s{2,}", text.strip())
-    parts = [p for p in parts if p]
+    parts = [p.strip() for p in parts]
     while len(parts) < 6:
         parts.append("")
     return parts[:6]
