@@ -9,7 +9,7 @@ import streamlit as st
 from openai import OpenAI
 
 # =========================
-# Page + Theme
+# Page + Theme (Blue & Gold)
 # =========================
 st.set_page_config(page_title="Discussion Finding & Summary Checker", layout="wide")
 
@@ -20,15 +20,16 @@ LIGHT_BG = "#F7F9FC"
 st.markdown(
     f"""
     <style>
-      .block-container {{ padding-top: 2rem; }}
       body {{ background: {LIGHT_BG}; }}
-      h1, h2, h3, h4 {{ color: {BLUE}; }}
+      .block-container {{ padding-top: 1.6rem; }}
+      h1, h2, h3 {{ color: {BLUE}; }}
       .card {{
         background: white;
         border: 2px solid {BLUE};
         border-radius: 14px;
         padding: 16px 18px;
         box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+        margin-bottom: 1rem;
       }}
       .pill {{
         display:inline-block;
@@ -37,7 +38,7 @@ st.markdown(
         border: 1px solid {GOLD};
         color: {BLUE};
         background: rgba(212,175,55,0.15);
-        font-weight: 600;
+        font-weight: 700;
         font-size: 12px;
       }}
       .warn {{
@@ -45,33 +46,66 @@ st.markdown(
         background: rgba(212,175,55,0.12);
         padding: 10px 12px;
         border-radius: 10px;
+        margin: 0.5rem 0;
       }}
       .bad {{
         border-left: 6px solid #B00020;
         background: rgba(176,0,32,0.08);
         padding: 10px 12px;
         border-radius: 10px;
+        margin: 0.5rem 0;
       }}
       .good {{
         border-left: 6px solid #0F7B0F;
         background: rgba(15,123,15,0.08);
         padding: 10px 12px;
         border-radius: 10px;
+        margin: 0.5rem 0;
       }}
       .small {{ color: #4b5563; font-size: 13px; }}
       textarea {{
         font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
       }}
+      .metricbox {{
+        border: 1px solid rgba(11,45,92,0.25);
+        border-radius: 12px;
+        padding: 10px 12px;
+        background: rgba(11,45,92,0.03);
+      }}
+      code {{ background: rgba(11,45,92,0.07); padding: 2px 6px; border-radius: 8px; }}
     </style>
     """,
     unsafe_allow_html=True
 )
 
+st.title("Discussion Finding & Summary Checker")
+
+st.markdown(
+    f"""
+    <div class="card">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+        <div>
+          <b>Paste one Excel row (6 cells) horizontally.</b><br/>
+          <span class="small">
+            Uses only: <b>Cell 1</b> (Discussion quote), <b>Cell 4</b> (student summary), <b>Cell 6</b> (PDF link).
+            Cells 2, 3, and 5 are ignored.
+          </span>
+        </div>
+        <div class="pill">Blue &amp; Gold</div>
+      </div>
+      <div class="warn">
+        <b>Streamlined grading:</b> Copy the row → paste → click Evaluate.
+        This app will auto-detect the first URL anywhere in your paste and will auto-convert SharePoint links to direct-download.
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
 # =========================
-# OpenAI client
+# OpenAI Client
 # =========================
 def get_openai_client():
-    # Prefer Streamlit secrets; fall back to env var
     key = None
     try:
         key = st.secrets.get("OPENAI_API_KEY")
@@ -84,33 +118,33 @@ def get_openai_client():
     return OpenAI(api_key=key)
 
 client = get_openai_client()
-
-MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # change if you want
+MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 # =========================
-# Robust Excel row parsing
+# Excel Row Parsing + URL Detection
 # =========================
 URL_RE = re.compile(r"https?://[^\s<>\]]+", re.IGNORECASE)
 
 def looks_like_url(s: str) -> bool:
     if not s:
         return False
-    s = s.strip()
-    return s.lower().startswith("http://") or s.lower().startswith("https://")
+    s = s.strip().lower()
+    return s.startswith("http://") or s.startswith("https://")
 
 def find_first_url_anywhere(text: str) -> str:
     if not text:
         return ""
     m = URL_RE.search(text)
-    return m.group(0).strip() if m else ""
+    if not m:
+        return ""
+    url = m.group(0).strip()
+    # common trailing punctuation
+    return url.rstrip(").,;:!?\"'")
 
 def split_excel_row(text: str):
     """
-    Excel copies a horizontal row as TAB-separated values.
-    This parser:
-      - reads TSV safely
-      - takes the first non-empty row
-      - pads to 6 cells
+    Excel horizontal row copy -> tab-separated values.
+    Take first non-empty row; normalize to 6 cells.
     """
     if not text:
         return [""] * 6, []
@@ -118,107 +152,110 @@ def split_excel_row(text: str):
     buf = io.StringIO(text)
     reader = csv.reader(buf, delimiter="\t")
     rows = [r for r in reader if any((c or "").strip() for c in r)]
-
-    # If user pasted multiple rows, take the first and warn
     warnings = []
+
     if len(rows) > 1:
         warnings.append(f"Detected {len(rows)} rows pasted. Using the first row only.")
 
     row = rows[0] if rows else []
-    # Normalize length to 6
-    while len(row) < 6:
-        row.append("")
+    row = [(c or "").strip() for c in row]
+
+    if len(row) < 6:
+        row += [""] * (6 - len(row))
     if len(row) > 6:
-        # Keep first 6 cells; note extras
         warnings.append(f"Detected {len(row)} columns; using the first 6.")
         row = row[:6]
 
-    # Strip whitespace
-    row = [(c or "").strip() for c in row]
     return row, warnings
 
 # =========================
-# PDF download + text extraction
+# SharePoint Direct Download Normalization
 # =========================
-def download_pdf_bytes(url: str, timeout=20) -> bytes:
+def normalize_sharepoint_download_url(url: str) -> str:
     """
-    Attempt to download a PDF.
-    Many SharePoint links require auth and will return HTML instead of a PDF.
-    We'll detect that and raise a helpful error.
+    Convert SharePoint/OneDrive links into a download-friendly URL by adding download=1.
+    Works for many share links. If the URL already has download=1, leave it.
     """
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; AcademicQuoteChecker/1.0)"
-    }
+    if not url:
+        return url
+    lower = url.lower()
+    if ("sharepoint.com" in lower) or ("onedrive" in lower):
+        if "download=1" not in lower:
+            return url + ("&download=1" if "?" in url else "?download=1")
+    return url
+
+# =========================
+# PDF Download + Text Extraction
+# =========================
+def download_pdf_bytes(url: str, timeout=25) -> bytes:
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; AcademicQuoteChecker/1.0)"}
+    url = normalize_sharepoint_download_url(url)
+
     r = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
     r.raise_for_status()
 
     content = r.content or b""
     ct = (r.headers.get("Content-Type") or "").lower()
 
-    # Most reliable PDF signature check
+    # PDF signature
     if content[:4] == b"%PDF":
         return content
 
-    # Sometimes PDFs come as octet-stream; still might be PDF
+    # Sometimes PDFs arrive as application/octet-stream; still OK if content is PDF-like
     if "pdf" in ct:
-        # Try signature anyway
         return content
 
-    # If it looks like HTML, it's probably a login or preview page
-    snippet = content[:200].lower()
-    if b"<html" in snippet or b"<!doctype html" in snippet:
+    # HTML means you got a viewer/login page, not the file bytes
+    head = content[:300].lower()
+    if b"<html" in head or b"<!doctype html" in head:
         raise ValueError(
-            "The link returned an HTML page (likely a login/SharePoint preview page), not a downloadable PDF."
+            "The link returned an HTML page (SharePoint viewer/login), not a direct PDF download. "
+            "Try using a Share link to the file (not a folder), and the app will append download=1 automatically."
         )
 
     raise ValueError(f"Link did not return a PDF (Content-Type: {ct or 'unknown'}).")
 
-def extract_text_from_pdf(pdf_bytes: bytes, max_pages=20) -> str:
-    """
-    Extract text with pdfplumber. Limit pages for speed.
-    """
+def extract_text_from_pdf(pdf_bytes: bytes, max_pages=25) -> str:
     text_parts = []
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         n = min(len(pdf.pages), max_pages)
         for i in range(n):
-            page = pdf.pages[i]
-            t = page.extract_text() or ""
+            t = pdf.pages[i].extract_text() or ""
             if t.strip():
                 text_parts.append(t)
     return "\n\n".join(text_parts).strip()
 
 def extract_discussion_section(full_text: str) -> str:
     """
-    Heuristic discussion extraction:
-    - find 'Discussion' header
-    - stop at 'Conclusion', 'Limitations', 'References', etc.
-    Not perfect, but works well for many journal PDFs.
+    Heuristic:
+    - Find a 'Discussion' header
+    - Stop at common next sections
+    If no Discussion header is found, return a large slice to let the model decide (may reduce confidence).
     """
     if not full_text:
         return ""
 
     t = full_text
-    t_lower = t.lower()
+    tl = t.lower()
 
-    # Find discussion start
-    start_candidates = [
+    start_patterns = [
         r"\n\s*discussion\s*\n",
-        r"\n\s*discussion\s*and\s*conclusion\s*\n",
         r"\n\s*general\s*discussion\s*\n",
+        r"\n\s*discussion\s*and\s*conclusion\s*\n",
     ]
+
     start_idx = -1
-    for pat in start_candidates:
-        m = re.search(pat, t_lower, flags=re.IGNORECASE)
+    for pat in start_patterns:
+        m = re.search(pat, tl, flags=re.IGNORECASE)
         if m:
             start_idx = m.start()
             break
 
     if start_idx == -1:
-        # If no header, return first chunk (better than nothing)
-        return t[:12000]
+        # fallback: provide a big chunk for model, but warn user
+        return t[:18000]
 
-    # Find stop markers after start
-    stop_markers = [
+    stop_patterns = [
         r"\n\s*conclusion\s*\n",
         r"\n\s*limitations\s*\n",
         r"\n\s*implications\s*\n",
@@ -227,225 +264,217 @@ def extract_discussion_section(full_text: str) -> str:
         r"\n\s*appendix\s*\n",
         r"\n\s*acknowledg",
     ]
-    after = t_lower[start_idx + 1:]
-    stop_idx_rel = None
-    for pat in stop_markers:
+
+    after = tl[start_idx + 1:]
+    stop_rel = None
+    for pat in stop_patterns:
         m = re.search(pat, after, flags=re.IGNORECASE)
         if m:
-            stop_idx_rel = m.start()
+            stop_rel = m.start()
             break
 
-    end_idx = (start_idx + 1 + stop_idx_rel) if stop_idx_rel is not None else len(t)
+    end_idx = (start_idx + 1 + stop_rel) if stop_rel is not None else len(t)
     section = t[start_idx:end_idx].strip()
-
-    # Keep it within a reasonable size for the model
-    return section[:16000]
+    return section[:20000]
 
 # =========================
-# LLM Evaluation
+# LLM Evaluation (JSON Output)
 # =========================
-def evaluate_with_llm(quote: str, student_expl: str, discussion_text: str, pdf_ref: str) -> dict:
+def safe_json_loads(s: str) -> dict:
+    s2 = re.sub(r"^```json\s*|\s*```$", "", s.strip(), flags=re.IGNORECASE | re.MULTILINE).strip()
+    return json.loads(s2)
+
+def llm_grade(quote: str, student: str, discussion_text: str, pdf_ref: str) -> dict:
     """
-    Returns a structured dict.
+    If quote is not supported, model also:
+    - identifies likely Discussion findings
+    - provides short verbatim excerpts (<=25 words each)
+    - provides suggestions/feedback
     """
     if not client:
-        return {
-            "error": "No OpenAI API key configured. Add OPENAI_API_KEY to Streamlit secrets or environment variables."
-        }
+        return {"error": "OPENAI_API_KEY is not set. Add it to Streamlit Secrets (OPENAI_API_KEY)."}
 
-    # Keep discussion excerpt bounded
-    discussion_excerpt = discussion_text[:12000] if discussion_text else ""
+    discussion_excerpt = discussion_text[:14000] if discussion_text else ""
 
     system = (
-        "You are a careful academic grader. "
-        "You ONLY use the provided discussion section excerpt (or lack of it) and the quote/explanation. "
-        "If evidence is insufficient, say 'uncertain' rather than guessing."
+        "You are a strict academic grading assistant. "
+        "You only use the provided DISCUSSION_EXCERPT and the quote/student text. "
+        "CRITICAL: If you provide verbatim excerpts from the excerpt, each excerpt must be <= 25 words. "
+        "Return STRICT JSON only. No markdown."
     )
 
     user = f"""
-TASKS
-1) Determine whether the QUOTE is actually a finding/claim presented in the DISCUSSION section of the article.
-   - Answer: yes / no / uncertain
-   - Provide brief evidence: point to matching language or explain why it is not supported.
+You will grade two things:
 
-2) Determine whether the STUDENT EXPLANATION (Cell 4) is a fair representation of the QUOTE (Cell 1).
-   - Rate accuracy: 1 (poor) to 5 (excellent)
-   - List any distortions, additions, or missing nuances.
+A) SOURCE CHECK (Discussion finding?)
+Decide whether QUOTE is actually supported by the DISCUSSION_EXCERPT as a finding/claim.
+Return: "yes" / "no" / "uncertain"
+- Evidence must be short.
+- If "no" or "uncertain", identify what the Discussion *does* claim as key findings, based only on the excerpt.
 
-INPUTS
-PDF reference/link (Cell 6 or detected): {pdf_ref}
+B) REPRESENTATION CHECK
+Is STUDENT_SUMMARY a fair representation of QUOTE?
+Return: "yes" / "partly" / "no"
+Also list concrete issues: overclaiming, missing qualifiers, adding new ideas, causal leaps, etc.
 
-QUOTE (Cell 1):
+C) PROFESSOR SUGGESTIONS
+Give brief suggestions the professor can use for feedback and improvement.
+
+IMPORTANT VERBATIM RULE:
+If you quote anything from the excerpt, provide up to 3 excerpts, each <= 25 words (hard limit).
+
+Inputs:
+PDF_REF: {pdf_ref}
+
+QUOTE:
 {quote}
 
-STUDENT EXPLANATION (Cell 4):
-{student_expl}
+STUDENT_SUMMARY:
+{student}
 
-DISCUSSION SECTION EXCERPT (best-effort):
+DISCUSSION_EXCERPT:
 {discussion_excerpt}
 
-OUTPUT FORMAT (STRICT JSON)
+Output STRICT JSON exactly like this:
 {{
   "quote_is_discussion_finding": "yes|no|uncertain",
-  "evidence": "short evidence or reason",
-  "student_summary_accuracy_1_to_5": 1,
-  "summary_issues": ["..."],
-  "suggested_professor_feedback": "short feedback you would write to the student",
+  "source_evidence": "brief reasoning",
+  "verbatim_discussion_excerpts": [
+    {{"excerpt": "<=25 words", "why_it_matters": "short"}}
+  ],
+  "likely_discussion_findings_paraphrase": [
+    "short paraphrase 1",
+    "short paraphrase 2"
+  ],
+  "student_summary_fair_representation": "yes|partly|no",
+  "student_summary_accuracy_score_1_to_5": 1,
+  "student_summary_issues": ["..."],
+  "professor_feedback_suggestion": "1-3 sentences you would write to the student",
   "confidence": "low|medium|high"
 }}
 """
 
     resp = client.chat.completions.create(
         model=MODEL,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+        messages=[{"role": "system", "content": system},
+                  {"role": "user", "content": user}],
         temperature=0.2,
     )
 
-    content = resp.choices[0].message.content.strip()
-
-    # Parse JSON safely
+    raw = resp.choices[0].message.content.strip()
     try:
-        # Some models wrap JSON in code fences
-        content_clean = re.sub(r"^```json\s*|\s*```$", "", content, flags=re.IGNORECASE | re.MULTILINE).strip()
-        return json.loads(content_clean)
+        return safe_json_loads(raw)
     except Exception:
-        return {
-            "error": "Model returned non-JSON output. Here is the raw response:",
-            "raw": content
-        }
+        return {"error": "Model returned non-JSON output.", "raw": raw}
 
 # =========================
-# UI
+# UI Inputs
 # =========================
-st.title("Discussion Finding & Summary Checker")
+paste = st.text_area("Paste the Excel row here (one horizontal row, 6 cells)", height=160)
 
-st.markdown(
-    f"""
-    <div class="card">
-      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
-        <div>
-          <b>Paste one Excel row (6 cells) horizontally.</b><br/>
-          <span class="small">Only these are used: <b>Cell 1</b> (quote), <b>Cell 4</b> (student explanation), <b>Cell 6</b> (PDF link/reference). Cells 2, 3, 5 are ignored.</span>
-        </div>
-        <div class="pill">Blue &amp; Gold</div>
-      </div>
-      <hr style="border:none; border-top:1px solid #e5e7eb; margin:12px 0;">
-      <div class="small">
-        <b>Pro tip for speed (200 rows):</b> keep the PDF link as a plain URL in Excel (starts with <code>https://</code>).  
-        If Excel only pastes a filename instead of the link, this app will also try to auto-detect the first URL anywhere in the pasted text.
-      </div>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
-
-paste = st.text_area("Paste the Excel row here (one row)", height=160, placeholder="Copy one horizontal row (6 cells) from Excel and paste here...")
-
-colA, colB = st.columns([1, 1])
-with colA:
-    st.caption("If the PDF link is blocked (SharePoint login), upload the PDF here (optional fallback).")
+left, right = st.columns([1, 1])
+with left:
+    st.caption("PDF upload fallback (only if the link won’t download).")
     uploaded_pdf = st.file_uploader("Upload PDF (fallback)", type=["pdf"])
-with colB:
-    st.caption("If you want, you can paste the PDF URL directly here (overrides Cell 6).")
+with right:
+    st.caption("Optional: paste a PDF URL here to override Cell 6.")
     manual_url = st.text_input("PDF URL override (optional)", value="")
 
-st.divider()
-
-# Parse
 cells, warnings = split_excel_row(paste)
+cell1 = cells[0]
+cell4 = cells[3]
+cell6 = cells[5]
 
-# Pull the required cells
-cell1_quote = cells[0]
-cell4_expl = cells[3]
-cell6_ref = cells[5]
+# Determine PDF URL
+auto_url = find_first_url_anywhere(paste) if not looks_like_url(cell6) else ""
+pdf_url = ""
 
-# If Cell 6 isn't a URL, search the entire pasted blob for any URL
-auto_url = ""
-if not looks_like_url(cell6_ref):
-    auto_url = find_first_url_anywhere(paste)
+if looks_like_url(manual_url.strip()):
+    pdf_url = manual_url.strip()
+elif looks_like_url(cell6):
+    pdf_url = cell6
+elif auto_url:
+    pdf_url = auto_url
 
-# Allow manual override
-pdf_ref = manual_url.strip() if looks_like_url(manual_url.strip()) else ""
-if not pdf_ref:
-    pdf_ref = cell6_ref if looks_like_url(cell6_ref) else auto_url
-
-# Preview (so you can trust what it detected)
-with st.expander("Preview (what the app detected for Cells 1, 4, 6)", expanded=True):
+# Preview
+with st.expander("Preview (Cells 1, 4, 6 detected)", expanded=True):
     if warnings:
         st.markdown('<div class="warn"><b>Notes:</b><br/>' + "<br/>".join(warnings) + "</div>", unsafe_allow_html=True)
 
     c1, c4, c6 = st.columns(3)
     with c1:
         st.subheader("Cell 1 (Quote)")
-        st.text_area(" ", cell1_quote or "[empty]", height=180, label_visibility="collapsed")
+        st.text_area("cell1_preview", cell1 or "[empty]", height=200, label_visibility="collapsed")
     with c4:
-        st.subheader("Cell 4 (Student explanation)")
-        st.text_area("  ", cell4_expl or "[empty]", height=180, label_visibility="collapsed")
+        st.subheader("Cell 4 (Student summary)")
+        st.text_area("cell4_preview", cell4 or "[empty]", height=200, label_visibility="collapsed")
     with c6:
-        st.subheader("Cell 6 (PDF link / reference)")
-        st.text_area("   ", pdf_ref or "[empty]", height=70, label_visibility="collapsed")
+        st.subheader("Cell 6 (PDF link detected)")
+        display = pdf_url if pdf_url else (cell6 if cell6 else "[empty]")
+        st.text_area("cell6_preview", display, height=80, label_visibility="collapsed")
 
-# Validate minimal requirements
+# Validate minimum
 missing = []
-if not cell1_quote:
+if len(cell1.strip()) < 10:
     missing.append("Cell 1 (quote)")
-if not cell4_expl:
-    missing.append("Cell 4 (student explanation)")
-# For cell6: either URL or uploaded PDF is acceptable
-if not pdf_ref and not uploaded_pdf:
-    missing.append("Cell 6 (PDF link) OR uploaded PDF")
+if len(cell4.strip()) < 10:
+    missing.append("Cell 4 (student summary)")
+if not pdf_url and not uploaded_pdf:
+    missing.append("Cell 6 URL (https://...) OR uploaded PDF")
 
 if missing:
     st.markdown('<div class="bad"><b>Missing required input:</b><br/>' + "<br/>".join(missing) + "</div>", unsafe_allow_html=True)
 
 st.divider()
 
+# =========================
+# Evaluate
+# =========================
 if st.button("Evaluate", type="primary", use_container_width=True, disabled=bool(missing)):
-    # Step 1: get PDF bytes (URL or upload)
+    # Acquire PDF
     pdf_bytes = None
-    pdf_source = ""
+    pdf_ref = ""
 
     if uploaded_pdf is not None:
         pdf_bytes = uploaded_pdf.read()
-        pdf_source = "uploaded PDF"
-    elif pdf_ref:
-        pdf_source = pdf_ref
+        pdf_ref = "uploaded PDF"
+        st.markdown('<div class="good"><b>PDF source:</b> uploaded</div>', unsafe_allow_html=True)
+    else:
+        pdf_ref = pdf_url
         try:
-            with st.spinner("Downloading PDF from link..."):
-                pdf_bytes = download_pdf_bytes(pdf_ref)
+            with st.spinner("Downloading PDF…"):
+                pdf_bytes = download_pdf_bytes(pdf_url)
+            st.markdown('<div class="good"><b>PDF source:</b> link download succeeded</div>', unsafe_allow_html=True)
         except Exception as e:
             st.markdown(
-                f"""
-                <div class="bad">
-                  <b>Could not download the PDF from the link.</b><br/>
-                  Reason: {str(e)}<br/><br/>
-                  <b>What to do:</b><br/>
-                  • If this is SharePoint/OneDrive: it may require login and Streamlit can't access it.<br/>
-                  • Use a direct downloadable link (not a preview page), OR upload the PDF using the uploader above.
-                </div>
-                """,
+                f'<div class="bad"><b>Could not download PDF from link.</b><br/>'
+                f'Reason: <code>{str(e)}</code><br/><br/>'
+                f'<b>Fix:</b> Use a file share link directly to the PDF (not a folder view). '
+                f'This app auto-adds <code>download=1</code> for SharePoint. If it still fails, upload the PDF.</div>',
                 unsafe_allow_html=True
             )
             st.stop()
 
-    # Step 2: extract text + discussion section
-    with st.spinner("Extracting text from PDF (first pages)..."):
-        full_text = extract_text_from_pdf(pdf_bytes, max_pages=20)
-        discussion = extract_discussion_section(full_text)
+    # Extract text
+    with st.spinner("Extracting text from PDF (first pages)…"):
+        full_text = extract_text_from_pdf(pdf_bytes, max_pages=25)
 
-    # Step 3: LLM evaluation
-    with st.spinner("Evaluating quote + student explanation against Discussion section..."):
-        result = evaluate_with_llm(
-            quote=cell1_quote,
-            student_expl=cell4_expl,
-            discussion_text=discussion,
-            pdf_ref=pdf_source
+    if not full_text.strip():
+        st.markdown(
+            '<div class="bad"><b>Could not extract text from the PDF.</b> '
+            'This is common if it’s a scanned image PDF. Consider uploading a text-based PDF.</div>',
+            unsafe_allow_html=True
         )
+        st.stop()
 
-    # Step 4: display results
+    discussion = extract_discussion_section(full_text)
+    if not discussion.strip():
+        discussion = full_text[:18000]
+
+    # Grade via LLM
+    with st.spinner("Grading (quote vs discussion; student summary vs quote)…"):
+        result = llm_grade(cell1, cell4, discussion, pdf_ref)
+
     st.subheader("Results")
 
     if "error" in result:
@@ -454,34 +483,61 @@ if st.button("Evaluate", type="primary", use_container_width=True, disabled=bool
             st.code(result["raw"])
         st.stop()
 
-    q = result.get("quote_is_discussion_finding", "uncertain")
-    acc = result.get("student_summary_accuracy_1_to_5", None)
-    conf = result.get("confidence", "low")
+    # Headline metrics
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.markdown("<div class='metricbox'><b>Quote is Discussion finding?</b><br/>"
+                    f"{result.get('quote_is_discussion_finding','uncertain').upper()}</div>", unsafe_allow_html=True)
+    with m2:
+        st.markdown("<div class='metricbox'><b>Summary fair representation?</b><br/>"
+                    f"{result.get('student_summary_fair_representation','partly').upper()}</div>", unsafe_allow_html=True)
+    with m3:
+        sc = result.get("student_summary_accuracy_score_1_to_5", "—")
+        st.markdown("<div class='metricbox'><b>Accuracy score (1–5)</b><br/>"
+                    f"{sc}</div>", unsafe_allow_html=True)
 
-    top = st.columns([1, 1, 1])
-    with top[0]:
-        st.metric("Quote is a Discussion finding?", str(q).upper())
-    with top[1]:
-        st.metric("Student summary accuracy (1–5)", acc if acc is not None else "—")
-    with top[2]:
-        st.metric("Confidence", str(conf).upper())
+    st.markdown("### A) Source check (Discussion finding?)")
+    st.write(result.get("source_evidence", ""))
 
-    st.markdown("**Evidence / rationale**")
-    st.write(result.get("evidence", ""))
+    excerpts = result.get("verbatim_discussion_excerpts", []) or []
+    if excerpts:
+        st.markdown("**Short verbatim excerpts from Discussion (<= 25 words each):**")
+        for item in excerpts[:3]:
+            ex = (item.get("excerpt") or "").strip()
+            why = (item.get("why_it_matters") or "").strip()
+            if ex:
+                st.write(f'• “{ex}”')
+                if why:
+                    st.write(f"  - {why}")
+    else:
+        st.markdown("<div class='warn'><b>No excerpts returned.</b> The model may be uncertain or the excerpt lacked clear findings.</div>", unsafe_allow_html=True)
 
-    st.markdown("**Summary issues (if any)**")
-    issues = result.get("summary_issues", [])
+    st.markdown("**Likely Discussion findings (paraphrase):**")
+    findings = result.get("likely_discussion_findings_paraphrase", []) or []
+    if findings:
+        for f in findings[:6]:
+            st.write(f"- {f}")
+    else:
+        st.write("—")
+
+    st.markdown("### B) Student summary check (Cell 4 vs Cell 1)")
+    issues = result.get("student_summary_issues", []) or []
     if issues:
-        for i in issues:
+        st.markdown("**Issues detected:**")
+        for i in issues[:8]:
             st.write(f"- {i}")
     else:
-        st.write("None noted.")
+        st.write("No major issues detected.")
 
-    st.markdown("**Suggested professor feedback**")
-    st.write(result.get("suggested_professor_feedback", ""))
+    st.markdown("### C) Suggested professor feedback")
+    st.write(result.get("professor_feedback_suggestion", ""))
+
+    st.caption(f"Confidence: {result.get('confidence','low').upper()}")
 
     with st.expander("Discussion excerpt used (for transparency)"):
-        st.text_area("Discussion excerpt", discussion or "[No discussion section detected — model may report 'uncertain']",
-                     height=260)
+        st.text_area("Discussion excerpt", discussion[:20000], height=320)
 
-st.caption("Tip: If your Excel ‘PDF link’ cell is a clickable hyperlink with a friendly title, Excel may paste only the title. For fastest grading, store the PDF URL as plain text in the cell (starts with https://).")
+st.caption(
+    "Speed tip: for best results, make Cell 6 contain the actual URL text (starts with https://), not only a clickable label. "
+    "This app auto-adds download=1 for SharePoint/OneDrive links."
+)
